@@ -160,22 +160,52 @@ class Classification:
     notes: list[str] = field(default_factory=list)
 
 
+TOPIC_CLAIMS: dict[str, tuple[str, ...]] = {
+    "canceled_order_paid": ("cancel",),
+    "unavailable_order_paid": ("unavailable",),
+    "late_delivery_seller": ("late",),
+    "late_delivery_logistics": ("late",),
+    "valid_split_payment": ("duplicate",),
+    "duplicate_charge": ("duplicate",),
+    "payment_mismatch": ("mismatch",),
+    "refund_pending": ("refund",),
+    "refund_failed": ("refund",),
+    "requested_full_refund": ("refund",),
+    "unsupported_claim": (),
+}
+
+
+def claim_topics(case: dict[str, Any]) -> list[tuple[str, str]]:
+    """``(claim_id, topic)`` pairs declared in the case input."""
+    request = case.get("customer_request")
+    source = request if isinstance(request, dict) else case
+    claims = source.get("claims")
+    if not isinstance(claims, list):
+        return []
+    return [
+        (claim["claim_id"], str(claim.get("topic") or claim.get("type") or ""))
+        for claim in claims
+        if isinstance(claim, dict) and isinstance(claim.get("claim_id"), str)
+    ]
+
+
 def detect_claims(case: dict[str, Any], text: str) -> list[str]:
+    """Claim categories. Structured claim topics win over keyword matching."""
+    topics = [topic for _, topic in claim_topics(case) if topic]
+    if topics:
+        found = [category for topic in topics for category in TOPIC_CLAIMS.get(topic, ())]
+        unknown = [topic for topic in topics if topic not in TOPIC_CLAIMS]
+        text = "\n".join(unknown)
+        if not unknown:
+            return unique(found)
+    else:
+        found = []
     lowered = text.lower()
-    found = [
+    found.extend(
         claim
         for claim, patterns in CLAIM_PATTERNS.items()
         if any(re.search(pattern, lowered) for pattern in patterns)
-    ]
-    for key in ("claim_type", "claim_types", "complaint_type", "category", "issue_type"):
-        value = case.get(key)
-        values = value if isinstance(value, list) else [value]
-        for item in values:
-            if not isinstance(item, str):
-                continue
-            for claim, patterns in CLAIM_PATTERNS.items():
-                if any(re.search(pattern, item.lower()) for pattern in patterns):
-                    found.append(claim)
+    )
     return unique(found)
 
 

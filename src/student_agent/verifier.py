@@ -150,8 +150,12 @@ def calibrate(state: CaseState, decision: Decision) -> float:
         if not error.startswith("tool_not_discovered")
     ]
     confidence -= min(0.1, 0.03 * len(errors))
+    claimed = state.hints.get("claimed_issues") or []
     claims = state.hints.get("claims") or []
-    if claims and decision.primary_issue not in {"unsupported_claim", "insufficient_evidence"}:
+    if claimed:
+        if decision.primary_issue not in {*claimed, "unsupported_claim", "insufficient_evidence"}:
+            confidence -= 0.07
+    elif claims and decision.primary_issue not in {"unsupported_claim", "insufficient_evidence"}:
         related = set().union(*(CLAIM_ISSUES.get(claim, set()) for claim in claims))
         if decision.primary_issue not in related:
             confidence -= 0.07

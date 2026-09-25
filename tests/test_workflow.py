@@ -229,3 +229,29 @@ def test_transient_errors_are_retried(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     assert [c[0] for c in gateway.calls].count("get_order") == 2
     assert output["assessment"]["primary_issue"] == "canceled_order_paid"
+
+
+def test_real_input_shape_claims_and_ids(tmp_path: Path) -> None:
+    contracts = Contracts(ROOT / "contracts" / "schemas")
+    trace = TraceWriter(tmp_path / "trace.jsonl", contracts)
+    gateway = FakeGateway(scenario(order__order_status="canceled"))
+    case = {
+        "case_id": "L3A_CASE_001",
+        "opened_at": "2018-01-01T09:00:00-03:00",
+        "customer_request": {
+            "language": "vi",
+            "message": "Đơn hàng có dấu hiệu bất thường sau thanh toán.",
+            "claimed_order_id": ORDER_ID,
+            "claims": [
+                {"claim_id": "claim-001-a", "topic": "canceled_order_paid"},
+                {"claim_id": "claim-001-b", "topic": "requested_full_refund"},
+            ],
+        },
+        "policy_version": "EC_POLICY_V1",
+    }
+    output = asyncio.run(solve_case(case, gateway, trace))  # type: ignore[arg-type]
+    contracts.validate_output(output, "output")
+    assert gateway.calls[0] == ("get_order", {"case_id": "L3A_CASE_001", "order_id": ORDER_ID})
+    assert output["assessment"]["primary_issue"] == "canceled_order_paid"
+    verdicts = {c["claim_id"]: c["verdict"] for c in output["claim_assessments"]}
+    assert verdicts == {"claim-001-a": "supported", "claim-001-b": "supported"}

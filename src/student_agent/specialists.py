@@ -37,6 +37,8 @@ ARGUMENT_ALIASES: dict[str, tuple[str, ...]] = {
     "shipment_id": ("shipment_id", "tracking_id"),
     "tracking_id": ("tracking_id", "shipment_id"),
     "refund_id": ("refund_id",),
+    "policy_id": ("policy_id", "policy_version"),
+    "policy_version": ("policy_version", "policy_id"),
 }
 
 

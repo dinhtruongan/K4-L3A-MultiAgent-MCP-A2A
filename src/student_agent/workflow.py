@@ -14,7 +14,7 @@ from typing import Any
 from . import OUTPUT_SCHEMA_VERSION
 from .evidence import OLIST_ID, pick, strings, text_blob
 from .mcp_gateway import EvidenceGateway
-from .policy import classify, detect_claims, resolve
+from .policy import ISSUE_DOMAINS, claim_topics, classify, detect_claims, resolve
 from .specialists import OrderItemAgent, PaymentAgent, ShipmentAgent, Specialist
 from .state import MAX_HOPS, AgentMessage, CaseState, Decision, Finding
 from .trace import TraceWriter
@@ -84,8 +84,9 @@ def extract_hints(case: dict[str, Any]) -> dict[str, Any]:
         "tracking_id",
         "refund_id",
         "policy_id",
+        "policy_version",
     ):
-        value = pick(case, key)
+        value = pick(case, key, f"claimed_{key}")
         if isinstance(value, str | int) and str(value).strip():
             hints[key] = str(value).strip()
     if "order_id" not in hints:
@@ -93,6 +94,7 @@ def extract_hints(case: dict[str, Any]) -> dict[str, Any]:
         if candidates:
             hints["order_id"] = candidates[0]
     hints["claims"] = detect_claims(case, text)
+    hints["claimed_issues"] = [topic for _, topic in claim_topics(case) if topic in ISSUE_DOMAINS]
     return hints
 
 
@@ -212,35 +214,37 @@ class Coordinator:
         return output
 
 
+def _claim_verdict(state: CaseState, decision: Decision, topic: str) -> str:
+    issue = decision.primary_issue
+    if issue == "insufficient_evidence":
+        return "insufficient_evidence"
+    if topic == "requested_full_refund":
+        paid = state.facts("payment-agent").get("paid_total")
+        refund = decision.refund_total
+        if refund <= 0:
+            return "unsupported"
+        if paid is not None and refund + 0.01 < paid:
+            return "partially_supported"
+        return "supported"
+    if topic in ISSUE_DOMAINS:
+        return "supported" if topic == issue else "unsupported"
+    categories = detect_claims({}, topic)
+    related = set().union(*(CLAIM_ISSUES.get(c, set()) for c in categories))
+    if issue in {"unsupported_claim", "valid_split_payment"} or (related and issue not in related):
+        return "unsupported"
+    return "supported"
+
+
 def _claim_assessments(state: CaseState, decision: Decision, refs: list[str]) -> list[dict]:
-    claims = state.case.get("claims")
-    if not isinstance(claims, list):
-        return []
-    result = []
-    for claim in claims[:5]:
-        if not isinstance(claim, dict) or not isinstance(claim.get("claim_id"), str):
-            continue
-        categories = detect_claims(claim, text_blob(claim))
-        related = set().union(*(CLAIM_ISSUES.get(c, set()) for c in categories))
-        if decision.primary_issue == "insufficient_evidence":
-            verdict = "insufficient_evidence"
-        elif (
-            decision.primary_issue == "unsupported_claim"
-            or (related and decision.primary_issue not in related)
-            or decision.primary_issue == "valid_split_payment"
-        ):
-            verdict = "unsupported"
-        else:
-            verdict = "supported"
-        result.append(
-            {
-                "claim_id": claim["claim_id"][:64],
-                "verdict": verdict,
-                "confidence": decision.confidence,
-                "evidence_refs": refs,
-            }
-        )
-    return result
+    return [
+        {
+            "claim_id": claim_id[:64],
+            "verdict": _claim_verdict(state, decision, topic),
+            "confidence": decision.confidence,
+            "evidence_refs": refs,
+        }
+        for claim_id, topic in claim_topics(state.case)[:5]
+    ]
 
 
 def build_output(state: CaseState, decision: Decision) -> dict[str, Any]:
