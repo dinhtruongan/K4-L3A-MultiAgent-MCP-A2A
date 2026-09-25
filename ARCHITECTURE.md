@@ -1,53 +1,68 @@
 # L3A Architecture Record
 
-Team phải cập nhật tài liệu này cùng source. Mục tiêu là mô tả quyết định có thể kiểm chứng, không ghi prompt bí mật hoặc chain-of-thought.
-
 ## 1. System overview
 
-Vẽ hoặc mô tả luồng từ `inputs/<case_id>.json` đến MCP calls, specialist agents, verifier, output và trace.
-
 ```text
-Input → Coordinator → Specialists → Verifier → Output
-                         │              │
-                         └── MCP ───────┴── Trace
+Input (case JSON)
+    → Coordinator Agent (LLM: parse complaint, extract entity IDs)
+        → Order Agent (MCP: get_order, get_order_items)
+        → Payment Agent (MCP: get_payment)
+        → Shipment Agent (MCP: get_shipment)
+        → Policy Agent (MCP: get_policy)
+    → Coordinator (LLM: analyze & synthesize)
+    → Verifier (deterministic schema validation & consistency checks)
+    → Output JSON + Trace JSONL
 ```
 
 ## 2. Agent ownership
 
 | Actor | Input | Trách nhiệm | Output/handoff |
 | --- | --- | --- | --- |
-| Coordinator | TODO | TODO | TODO |
-| Order/item | TODO | TODO | TODO |
-| Payment | TODO | TODO | TODO |
-| Shipment | TODO | TODO | TODO |
-| Policy | TODO | TODO | TODO |
-| Verifier | TODO | TODO | TODO |
-
-Nêu rõ actor nào được quyền gọi tool nào. Tránh cho mọi agent quyền truy vấn tất cả tool nếu không cần thiết.
+| Coordinator | Case JSON | Parse complaint, extract IDs, dispatch, aggregate analysis | Parsed info → specialists; Analysis → verifier |
+| Order Agent | order_ids | Gọi get_order, get_order_items | Order & item data + evidence_refs |
+| Payment Agent | order_ids | Gọi get_payment | Payment data + evidence_refs |
+| Shipment Agent | order_ids | Gọi get_shipment | Shipment data + evidence_refs |
+| Policy Agent | issue_type | Gọi get_policy | Policy data + evidence_refs |
+| Verifier | Analysis result | Schema validation, consistency checks, fix invalid values | Final output dict |
 
 ## 3. A2A protocol
 
-Mô tả message envelope, correlation theo `case_id`, điều kiện handoff, timeout và cách tránh vòng lặp. Chỉ trace sự kiện/decision code quan sát được; không trace nội dung suy luận riêng.
+Message passing qua function calls trong Python. Correlation bằng `case_id`.
+Không có vòng lặp — luồng là one-pass: coordinator → specialists → coordinator → verifier.
 
 ## 4. Evidence lifecycle
 
-Mô tả cách validate MCP response, lưu `evidence_ref`, map evidence vào claim/output và emit `tool_result_consumed`. Evidence không được tái sử dụng giữa các case.
+1. MCP response được validate bởi `Contracts.validate_evidence()`
+2. `evidence_ref` được extract và lưu vào list
+3. Evidence data được tổng hợp cho LLM analysis
+4. `tool_result_consumed` event được emit cho mỗi MCP call
+5. Evidence refs được map vào output `evidence_refs` và `claim_assessments`
 
 ## 5. Failure policy
 
 | Failure | Retry? | Fallback | Trace event/code |
 | --- | --- | --- | --- |
-| MCP timeout | TODO | TODO | TODO |
-| Not found | TODO | TODO | TODO |
-| Source conflict | TODO | TODO | TODO |
-| Invalid specialist result | TODO | TODO | TODO |
-
-Retry phải có giới hạn và idempotent. Không chuyển missing evidence thành dữ liệu phỏng đoán.
+| MCP timeout | No | Skip, continue with partial data | Error logged (ignored silently for completion) |
+| Not found | No | Skip entity | Error logged (ignored silently for completion) |
+| Source conflict | No | Use LLM to resolve | data_conflicts in output |
+| Invalid specialist result | No | Default values via verifier | verification_completed |
 
 ## 6. Verification invariants
 
-Liệt kê kiểm tra trước finalize: schema, entity scope, evidence ownership, claim linkage, money totals, responsibility/action consistency và confidence bounds.
+- Schema compliance (l3a-output-v2)
+- primary_issue ∈ allowed enum
+- confidence ∈ [0, 1]
+- cause_code matches ^[A-Z][A-Z0-9_]{2,79}$
+- party_type ∈ allowed enum
+- currency = "BRL"
+- refund_brl ≥ 0
+- All evidence_refs are real (from MCP)
+- resolution_actions: max 8, max 80 chars each
 
 ## 7. Reproducibility
 
-Ghi model/config, dependency pinning, concurrency limit, random seed (nếu có), lệnh chạy và các giới hạn tài nguyên. Không ghi API key.
+- Model: Configured via environment variables (LLM_PROVIDER, LLM_MODEL), e.g. Llama 3.1 8B Instruct via Groq API or GPT-4o-mini via OpenAI API.
+- Temperature: 0.1
+- Concurrency: sequential (1 case at a time)
+- Run command: `day09 run`
+- Dependencies: see pyproject.toml + openai package
