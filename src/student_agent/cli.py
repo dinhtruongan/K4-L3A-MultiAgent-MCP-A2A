@@ -23,8 +23,13 @@ async def _show_tools(root: Path) -> None:
     settings = Settings.load(root)
     contracts = Contracts(root / "contracts" / "schemas")
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
-        for tool in await gateway.list_tools():
-            print(tool)
+        specs = await gateway.tool_specs()
+        for name in sorted(specs):
+            spec = specs[name]
+            arguments = ", ".join(
+                f"{prop}{'*' if prop in spec.required else ''}" for prop in spec.properties
+            )
+            print(f"{name}({arguments})")
 
 
 async def _run(root: Path) -> None:
@@ -80,8 +85,7 @@ def main() -> None:
         if args.command == "validate-inputs":
             case_set = load_case_set(root)
             print(
-                f"OK: {case_set.variant_id} / {case_set.version} / "
-                f"{len(case_set.case_ids)} cases"
+                f"OK: {case_set.variant_id} / {case_set.version} / {len(case_set.case_ids)} cases"
             )
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
