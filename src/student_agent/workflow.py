@@ -14,7 +14,7 @@ from typing import Any
 from . import OUTPUT_SCHEMA_VERSION
 from .evidence import OLIST_ID, pick, strings, text_blob
 from .mcp_gateway import EvidenceGateway
-from .policy import ISSUE_DOMAINS, claim_topics, classify, detect_claims, resolve
+from .policy import ISSUE_DOMAINS, claim_topics, classify, detect_claims, policy_rule, resolve
 from .specialists import OrderItemAgent, PaymentAgent, ShipmentAgent, Specialist
 from .state import MAX_HOPS, AgentMessage, CaseState, Decision, Finding
 from .trace import TraceWriter
@@ -23,18 +23,6 @@ from .verifier import CLAIM_ISSUES, verify
 COORDINATOR = "coordinator"
 POLICY_AGENT = "policy-agent"
 VERIFIER = "verifier-agent"
-ISSUE_ARGUMENT_KEYS = (
-    "primary_issue",
-    "issue",
-    "issue_code",
-    "issue_type",
-    "policy_type",
-    "policy_topic",
-    "topic",
-    "category",
-    "claim_type",
-    "dispute_type",
-)
 
 
 class PolicyAgent(Specialist):
@@ -44,8 +32,7 @@ class PolicyAgent(Specialist):
     async def run(self, state: CaseState, message: AgentMessage) -> Finding:
         finding = Finding(agent=self.name)
         cls = classify(state)
-        issue_context = dict.fromkeys(ISSUE_ARGUMENT_KEYS, cls.issue)
-        context = {**state.hints, **message.payload.get("context", {}), **issue_context}
+        context = {**state.hints, **message.payload.get("context", {})}
         policy = await self.fetch(state, finding, "policy", context, "dispute_policy")
         decision = resolve(state, cls, policy.data if policy else {})
         state.decision = decision
@@ -62,6 +49,7 @@ class PolicyAgent(Specialist):
                 "case_status": decision.case_status,
                 "refund_brl": decision.refund_total,
                 "policy_consulted": policy is not None,
+                "policy_rule_found": bool(policy and policy_rule(policy.data, cls.issue)),
             },
         )
         finding.facts = {"rule": decision.rule}
@@ -158,10 +146,6 @@ class Coordinator:
             "order_id": order.facts.get("order_id") or state.hints.get("order_id"),
             "customer_id": order.facts.get("customer_id"),
         }
-        if order.facts.get("payment_references"):
-            context["payment_reference"] = order.facts["payment_references"][0]
-        if order.facts.get("shipment_ids"):
-            context["shipment_id"] = order.facts["shipment_ids"][0]
         context = {key: value for key, value in context.items() if value}
         await self.delegate(
             state, payment_agent, "COLLECT_PAYMENT_REFUND", context=context, need_refund=True
@@ -207,6 +191,8 @@ class Coordinator:
                 "checks": ",".join(checks)[:200],
                 "confidence": decision.confidence,
                 "primary_issue": decision.primary_issue,
+                "rule": decision.rule[:120],
+                "out_of_scope_rows": out_of_scope_rows(state),
             },
         )
         back = self.message(state, VERIFIER, COORDINATOR, "VALIDATED_OUTPUT")
@@ -214,25 +200,48 @@ class Coordinator:
         return output
 
 
+FULL_REFUND_ISSUES = {
+    "canceled_order_paid",
+    "unavailable_order_paid",
+    "refund_failed",
+    "refund_pending",
+}
+PARTIAL_REFUND_ISSUES = {
+    "late_delivery_seller",
+    "late_delivery_logistics",
+    "duplicate_charge",
+    "payment_mismatch",
+}
+
+
 def _claim_verdict(state: CaseState, decision: Decision, topic: str) -> str:
     issue = decision.primary_issue
     if issue == "insufficient_evidence":
         return "insufficient_evidence"
     if topic == "requested_full_refund":
-        paid = state.facts("payment-agent").get("paid_total")
-        refund = decision.refund_total
-        if refund <= 0:
-            return "unsupported"
-        if paid is not None and refund + 0.01 < paid:
+        if issue in FULL_REFUND_ISSUES:
+            return "supported"
+        if issue in PARTIAL_REFUND_ISSUES:
             return "partially_supported"
-        return "supported"
+        return "unsupported"
+    if topic == "unsupported_claim" or issue == "unsupported_claim":
+        return "unsupported"
     if topic in ISSUE_DOMAINS:
         return "supported" if topic == issue else "unsupported"
-    categories = detect_claims({}, topic)
+    categories = state.hints.get("claims") or []
     related = set().union(*(CLAIM_ISSUES.get(c, set()) for c in categories))
-    if issue in {"unsupported_claim", "valid_split_payment"} or (related and issue not in related):
+    if issue == "valid_split_payment" or (related and issue not in related):
         return "unsupported"
     return "supported"
+
+
+def out_of_scope_rows(state: CaseState) -> int:
+    return int(
+        (state.facts("order-agent").get("items_excluded") or 0)
+        + (state.facts("payment-agent").get("payments_excluded") or 0)
+        + (state.facts("payment-agent").get("refunds_excluded") or 0)
+        + (state.facts("shipment-agent").get("excluded") or 0)
+    )
 
 
 def _claim_assessments(state: CaseState, decision: Decision, refs: list[str]) -> list[dict]:
@@ -265,15 +274,8 @@ def build_output(state: CaseState, decision: Decision) -> dict[str, Any]:
             "order_ids": order_ids[:20],
             "item_ids": strings(i["item_id"] for i in order.get("items") or [])[:20],
             "seller_ids": strings(order.get("seller_ids") or [])[:20],
-            "payment_references": strings(
-                [
-                    *(order.get("payment_references") or []),
-                    *(payment.get("payment_references") or []),
-                ]
-            )[:20],
-            "shipment_ids": strings(
-                [*(order.get("shipment_ids") or []), *(shipment.get("shipment_ids") or [])]
-            )[:20],
+            "payment_references": strings(payment.get("payment_references") or [])[:20],
+            "shipment_ids": strings(shipment.get("shipment_ids") or [])[:20],
         },
         "root_cause_analysis": {
             "ranked_causes": [
