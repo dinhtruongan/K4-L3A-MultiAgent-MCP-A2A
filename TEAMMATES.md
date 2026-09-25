@@ -1,4 +1,4 @@
-Đinh Trường An - 2A202602393
-Đinh Đức Thái - 2A202602648 
-Lâm Hoàng Phúc - 2A202602582
-Phan Đức Duy - 2A202602397
+- Đinh Trường An - 2A202602393
+- Đinh Đức Thái - 2A202602648
+- Lâm Hoàng Phúc - 2A202602582
+- Phan Đức Duy - 2A202602397
