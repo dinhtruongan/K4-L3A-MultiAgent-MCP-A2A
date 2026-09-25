@@ -34,3 +34,9 @@ dist/*
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local experiment artifacts (not part of the submission)
+experiments/*.jsonl
+models/
+*.gguf
+experiments/evidence-cache.json
