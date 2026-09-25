@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from .policy import INSUFFICIENT_EVIDENCE, ScopedEvidence, detect_issue
 
 # Override with LLM_MODEL in .env to try a different local model.
-DEFAULT_MODEL = os.getenv("LLM_MODEL", "llama3.1:8b")
+DEFAULT_MODEL = os.getenv("LLM_MODEL", "llama3.1:latest")
 
 ISSUES = (
     "canceled_order_paid",
