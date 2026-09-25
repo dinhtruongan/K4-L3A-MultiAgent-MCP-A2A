@@ -5,6 +5,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from .cases import CaseSet, load_case_set
 from .config import Settings
@@ -67,30 +68,54 @@ async def _run(root: Path) -> None:
     settings = Settings.load(root)
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
-    output_root = root / "outputs"
-    trace_path = root / "traces" / "trace.jsonl"
-    output_root.mkdir(parents=True, exist_ok=True)
-    trace_path.parent.mkdir(parents=True, exist_ok=True)
-    for stale in output_root.glob("*.json"):
-        stale.unlink()
-    trace_path.unlink(missing_ok=True)
-    trace = TraceWriter(trace_path, contracts)
+    with TemporaryDirectory(prefix=".day09-run-", dir=root) as temporary_root:
+        staging = Path(temporary_root)
+        output_root = staging / "outputs"
+        output_root.mkdir()
+        trace = TraceWriter(staging / "traces" / "trace.jsonl", contracts)
 
-    pending = list(case_set.case_ids)
-    stalled = 0
-    while pending:
-        remaining_before = len(pending)
-        try:
-            await _solve_pending(pending, case_set, contracts, trace, output_root, settings)
-        except Exception as exc:
-            stalled = stalled + 1 if len(pending) == remaining_before else 0
-            if stalled > MAX_STALLED_SESSIONS:
-                raise
-            print(
-                f"WARN: MCP session lost ({type(exc).__name__}: {str(exc)[:120]}); "
-                f"reconnecting with {len(pending)} cases left",
-                file=sys.stderr,
-            )
+        pending = list(case_set.case_ids)
+        stalled = 0
+        while pending:
+            remaining_before = len(pending)
+            try:
+                await _solve_pending(pending, case_set, contracts, trace, output_root, settings)
+            except Exception as exc:
+                stalled = stalled + 1 if len(pending) == remaining_before else 0
+                if stalled > MAX_STALLED_SESSIONS:
+                    raise
+                print(
+                    f"WARN: MCP session lost ({type(exc).__name__}: {str(exc)[:120]}); "
+                    f"reconnecting with {len(pending)} cases left",
+                    file=sys.stderr,
+                )
+
+        validate_artifacts(staging, case_set, contracts)
+        _publish_run(root, staging)
+
+
+def _publish_run(root: Path, staging: Path) -> None:
+    """Swap in a complete run, restoring the previous one if publication fails."""
+    moved_old: list[tuple[Path, Path]] = []
+    moved_new: list[tuple[Path, Path]] = []
+    try:
+        for name in ("outputs", "traces"):
+            current = root / name
+            backup = staging / f"previous_{name}"
+            if current.exists():
+                current.rename(backup)
+                moved_old.append((backup, current))
+        for name in ("outputs", "traces"):
+            source = staging / name
+            destination = root / name
+            source.rename(destination)
+            moved_new.append((destination, source))
+    except OSError:
+        for destination, source in reversed(moved_new):
+            destination.rename(source)
+        for backup, current in reversed(moved_old):
+            backup.rename(current)
+        raise
 
 
 def parser() -> argparse.ArgumentParser:
@@ -128,8 +153,11 @@ def main() -> None:
         elif args.command == "package":
             destination = package_submission(root, root / args.output)
             print(f"OK: {destination}")
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    except (OSError, RuntimeError, ValueError, ExceptionGroup) as exc:
+        cause = exc
+        while isinstance(cause, ExceptionGroup):
+            cause = cause.exceptions[0]
+        print(f"ERROR: {cause}", file=sys.stderr)
         raise SystemExit(1) from exc
 
 
