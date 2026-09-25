@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from urllib.request import Request, urlopen
 
-from .policy import INSUFFICIENT_EVIDENCE, ScopedEvidence, detect_issue
+from .policy import INSUFFICIENT_EVIDENCE, ScopedEvidence, detect_issue, parse_money
 
 # Override with LLM_MODEL in .env to try a different local model.
 DEFAULT_MODEL = os.getenv("LLM_MODEL", "llama3.1:latest")
@@ -46,6 +47,12 @@ Decide which single issue the evidence below demonstrates.
 
 Rules:
 - Use only the evidence. The customer's own description is a claim, not a fact.
+- valid_split_payment requires AT LEAST TWO distinct payment sequentials and a
+  captured total equal to the order total. One payment is never a split payment.
+- A late-delivery label requires both a late delivery timestamp and a matching
+  delivered_late event naming the responsible actor.
+- A refund label requires a refund event; duplicate_charge requires two captures
+  above the order total; payment_mismatch requires a reconciliation_mismatch event.
 - If the evidence shows nothing wrong with the order, answer unsupported_claim.
 - If the evidence is too thin to tell, answer insufficient_evidence.
 
@@ -68,6 +75,8 @@ undelivered case.
 - A reconciliation_mismatch event means the captured amount does not reconcile.
 - Two identical captures above the order total is a duplicate charge.
 - Several payment sequentials that sum to the order total is a valid split.
+- Exactly one payment sequential is not a split. A delivered-on-time order with
+  one matching capture and no refund or late event is unsupported_claim.
 - A delivered_late event names the party at fault.
 - No anomaly at all means the claim is unsupported.
 
@@ -138,26 +147,71 @@ def render_facts(scoped: ScopedEvidence) -> str:
     return "\n".join(lines)
 
 
+def _supported_by_evidence(issue: str, scoped: ScopedEvidence) -> bool:
+    """Reject a model label when its required factual signal is absent."""
+    captures = [
+        event for event in scoped.payment_events if event.get("event_type") == "captured"
+    ]
+    refund_states = {str(event.get("status", "")) for event in scoped.refund_events}
+    late_actors = {
+        str(event.get("actor", "")) for event in scoped.shipment_events
+        if event.get("event_type") == "delivered_late"
+    }
+    if issue == "canceled_order_paid":
+        return scoped.order_status == "canceled" and scoped.captured_total > 0
+    if issue == "unavailable_order_paid":
+        return scoped.order_status == "unavailable" and scoped.captured_total > 0
+    if issue == "late_delivery_seller":
+        return scoped.delivered_late and "seller" in late_actors
+    if issue == "late_delivery_logistics":
+        return scoped.delivered_late and "logistics_provider" in late_actors
+    if issue == "valid_split_payment":
+        return (
+            len(scoped.payment_references) >= 2
+            and scoped.item_total > 0
+            and scoped.captured_total == scoped.item_total
+        )
+    if issue == "payment_mismatch":
+        return any(
+            event.get("event_type") == "reconciliation_mismatch"
+            for event in scoped.payment_events
+        )
+    if issue == "duplicate_charge":
+        amounts = [parse_money(event.get("amount_brl")) for event in captures]
+        return len(amounts) >= 2 and len(set(amounts)) == 1 and sum(amounts) > scoped.item_total
+    if issue == "refund_pending":
+        return "pending" in refund_states
+    if issue == "refund_failed":
+        return "failed" in refund_states
+    if issue == "unsupported_claim":
+        return detect_issue(scoped)[0] == issue
+    return True
+
+
 def _ask(model: str, prompt: str) -> tuple[str, str]:
     """One deterministic call. Raises LLMUnavailable rather than guessing a label."""
     try:
-        import ollama
-    except ImportError as exc:  # pragma: no cover - depends on the local install
-        raise LLMUnavailable("ollama client is not installed") from exc
-    try:
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            format="json",
-            options={"temperature": 0, "num_predict": 120, "seed": 7},
+        payload = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "format": "json",
+            "stream": False,
+            "options": {"temperature": 0, "num_predict": 120, "seed": 7},
+        }).encode("utf-8")
+        request = Request(
+            os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/") + "/api/chat",
+            data=payload,
+            headers={"Content-Type": "application/json"},
         )
-        payload = json.loads(response["message"]["content"])
+        with urlopen(request, timeout=90) as response:
+            result = json.load(response)
+        answer = json.loads(result["message"]["content"])
     except Exception as exc:  # transport, decode and server faults all mean "no answer"
         raise LLMUnavailable(f"{type(exc).__name__}: {exc}") from exc
-    issue = str(payload.get("primary_issue", "")).strip()
+    issue = str(answer.get("primary_issue", "")).strip()
     if issue not in ISSUES:
         raise LLMUnavailable(f"model returned an unknown label: {issue[:40]!r}")
-    return issue, str(payload.get("why", "")).strip()[:120]
+    return issue, str(answer.get("why", "")).strip()[:120]
 
 
 def classify(
@@ -197,6 +251,9 @@ def classify(
         issue, source, base = fallback_issue, "llm-split-deterministic-tiebreak", 0.55
     else:
         issue, source, base = analyst, "llm-single-pass", 0.75
+
+    if not _supported_by_evidence(issue, scoped):
+        issue, source, base = fallback_issue, "llm-label-rejected-by-evidence", 0.60
 
     return Classification(
         issue=issue,

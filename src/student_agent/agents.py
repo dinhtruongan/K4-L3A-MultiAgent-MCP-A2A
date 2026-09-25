@@ -90,7 +90,11 @@ class EvidenceCollector:
             return self._cache[key]
         try:
             evidence = await self.gateway.call(tool_name, case_id=self.case_id, **arguments)
-        except RuntimeError:
+        except RuntimeError as exc:
+            if tool_name in REQUIRED_TOOLS:
+                raise EvidenceCollectorError(
+                    f"{self.case_id}: required MCP tool {tool_name} failed: {exc}"
+                ) from exc
             self.missing_tools.append(tool_name)
             return None
         self._cache[key] = evidence
@@ -145,6 +149,8 @@ async def investigate_order(
         raise EvidenceCollectorError("get_order returned no authoritative row")
     items = await collector.fetch("get_order_items", ORDER_AGENT, order_id=order_id)
     await collector.fetch("get_sellers", ORDER_AGENT, order_id=order_id)
+    if items is None:
+        raise EvidenceCollectorError("get_order_items returned no authoritative rows")
     return _data(order, {}), _data(items, [])
 
 
@@ -164,6 +170,8 @@ async def investigate_shipment(
 ) -> dict[str, Any]:
     """Shipment specialist: establish whether delivery met its commitment."""
     shipment = await collector.fetch("get_shipment_summary", SHIPMENT_AGENT, order_id=order_id)
+    if shipment is None:
+        raise EvidenceCollectorError("get_shipment_summary returned no authoritative row")
     return _data(shipment, {})
 
 

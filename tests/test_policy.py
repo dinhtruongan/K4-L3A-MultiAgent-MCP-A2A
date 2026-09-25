@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from student_agent.agents import verify
+from student_agent.llm import _supported_by_evidence, classify
 from student_agent.policy import (
     CANCELED_ORDER_PAID,
     DUPLICATE_CHARGE,
@@ -150,6 +151,15 @@ def test_late_delivery_is_attributed_to_the_actor_in_the_event() -> None:
 
 def test_clean_order_yields_unsupported_claim() -> None:
     assert detect_issue(build())[0] == UNSUPPORTED_CLAIM
+    assert not _supported_by_evidence(VALID_SPLIT_PAYMENT, build())
+    assert _supported_by_evidence(UNSUPPORTED_CLAIM, build())
+
+
+def test_consensus_cannot_invent_split_payment(monkeypatch) -> None:
+    monkeypatch.setattr("student_agent.llm._ask", lambda model, prompt: (VALID_SPLIT_PAYMENT, ""))
+    result = classify(build(), {UNSUPPORTED_CLAIM})
+    assert result.issue == UNSUPPORTED_CLAIM
+    assert result.source == "llm-label-rejected-by-evidence"
 
 
 def test_late_event_is_rejected_when_the_order_arrived_on_time() -> None:
