@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from .cases import load_case_set
+from .cases import CaseSet, load_case_set
 from .config import Settings
 from .contracts import Contracts
 from .mcp_gateway import connect_gateway
@@ -27,24 +27,23 @@ async def _show_tools(root: Path) -> None:
             print(tool)
 
 
-async def _run(root: Path) -> None:
-    settings = Settings.load(root)
-    case_set = load_case_set(root)
-    contracts = Contracts(root / "contracts" / "schemas")
-    output_root = root / "outputs"
-    trace_path = root / "traces" / "trace.jsonl"
-    output_root.mkdir(parents=True, exist_ok=True)
-    trace_path.parent.mkdir(parents=True, exist_ok=True)
-    for stale in output_root.glob("*.json"):
-        stale.unlink()
-    trace_path.unlink(missing_ok=True)
-    trace = TraceWriter(trace_path, contracts)
+# A transport fault tears down the whole MCP session, not just one call, so the
+# only recovery is a fresh session. The budget is spent only on attempts that make
+# no progress at all, so a genuinely broken case still fails loudly.
+MAX_STALLED_SESSIONS = 5
 
+
+async def _solve_pending(
+    pending: list[str], case_set: CaseSet, contracts: Contracts, trace: TraceWriter,
+    output_root: Path, settings: Settings,
+) -> None:
+    """Drain `pending` over one MCP session, removing each case as it is written."""
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         discovered_tools = await gateway.list_tools()
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
-        for case_id in case_set.case_ids:
+        while pending:
+            case_id = pending[0]
             case = case_set.cases[case_id]
             trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
             output = await solve_case(case, gateway, trace)
@@ -58,6 +57,40 @@ async def _run(root: Path) -> None:
             )
             temporary.replace(target)
             trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+            pending.pop(0)
+            done = len(case_set.case_ids) - len(pending)
+            if done % 10 == 0:
+                print(f"  {done}/{len(case_set.case_ids)} cases", file=sys.stderr)
+
+
+async def _run(root: Path) -> None:
+    settings = Settings.load(root)
+    case_set = load_case_set(root)
+    contracts = Contracts(root / "contracts" / "schemas")
+    output_root = root / "outputs"
+    trace_path = root / "traces" / "trace.jsonl"
+    output_root.mkdir(parents=True, exist_ok=True)
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    for stale in output_root.glob("*.json"):
+        stale.unlink()
+    trace_path.unlink(missing_ok=True)
+    trace = TraceWriter(trace_path, contracts)
+
+    pending = list(case_set.case_ids)
+    stalled = 0
+    while pending:
+        remaining_before = len(pending)
+        try:
+            await _solve_pending(pending, case_set, contracts, trace, output_root, settings)
+        except Exception as exc:
+            stalled = stalled + 1 if len(pending) == remaining_before else 0
+            if stalled > MAX_STALLED_SESSIONS:
+                raise
+            print(
+                f"WARN: MCP session lost ({type(exc).__name__}: {str(exc)[:120]}); "
+                f"reconnecting with {len(pending)} cases left",
+                file=sys.stderr,
+            )
 
 
 def parser() -> argparse.ArgumentParser:
