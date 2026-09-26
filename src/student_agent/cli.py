@@ -63,14 +63,14 @@ async def _run(root: Path) -> None:
                     temporary.replace(target)
                     trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
                     succeeded += 1
-                    print(f"[{idx}/{total}] ✓ {case_id}")
+                    print(f"[{idx}/{total}] OK {case_id}")
                     break  # success, exit retry loop
             except (Exception, BaseExceptionGroup) as exc:
                 if attempt < max_retries:
-                    print(f"[{idx}/{total}] ⚠ {case_id} attempt {attempt} failed: {exc!r}, retrying in {attempt * 2}s...")
+                    print(f"[{idx}/{total}] WARN {case_id} attempt {attempt} failed: {exc!r}, retrying in {attempt * 2}s...")
                     await asyncio.sleep(2 * attempt)
                 else:
-                    print(f"[{idx}/{total}] ✗ {case_id} FAILED after {max_retries} attempts: {exc!r}")
+                    print(f"[{idx}/{total}] FAIL {case_id} FAILED after {max_retries} attempts: {exc!r}")
                     failed_cases.append(case_id)
         # Small delay between cases
         await asyncio.sleep(0.3)
